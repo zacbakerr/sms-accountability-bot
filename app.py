@@ -1,115 +1,198 @@
+# app.py
 import os
-from flask import request, render_template, jsonify
-from twilio.rest import Client
-from twilio.twiml.messaging_response import MessagingResponse
+import hmac
+import hashlib
+from flask import Flask, request, jsonify, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import pytz
-from database import db, User
-from dotenv import load_dotenv
-
-load_dotenv()  # Load environment variables from .env file
+import psycopg2
+from psycopg2.extras import DictCursor
+import requests
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL').replace("://", "ql://", 1)
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db.init_app(app)
 
-# Twilio credentials
-account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-client = Client(account_sid, auth_token)
+# TextBelt configuration
+TEXTBELT_API_KEY = os.environ['TEXTBELT_API_KEY']
+TEXTBELT_URL = 'https://textbelt.com/text'
 
-@app.route("/sms", methods=['POST'])
-def sms_reply():
-    """Respond to incoming messages."""
-    body = request.values.get('Body', None)
-    from_number = request.values.get('From', None)
+# Database configuration
+DATABASE_URL = os.environ['DATABASE_URL']
 
-    resp = MessagingResponse()
-    resp.message("Got your message! Processing now...")
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
-    process_message(from_number, body)
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            phone_number TEXT PRIMARY KEY,
+            emergency_contact TEXT,
+            last_response DATE,
+            consecutive_misses INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    return str(resp)
+init_db()
 
-def process_message(phone_number, message):
-    """Process incoming messages and update user data."""
-    user = User.query.filter_by(phone_number=phone_number).first()
-    if not user:
-        user = User(phone_number=phone_number)
-        db.session.add(user)
-    
-    user.last_response = datetime.now(pytz.timezone('US/Eastern'))
-    user.goals_completed = 'yes' in message.lower()
-    db.session.commit()
+def send_sms(to_number, message):
+    payload = {
+        'phone': to_number,
+        'message': message,
+        'key': TEXTBELT_API_KEY,
+        'replyWebhookUrl': f"{request.url_root}sms_reply",
+        'sender': 'GoalTracker'  # Replace with your business/organization name
+    }
+    response = requests.post(TEXTBELT_URL, data=payload)
+    return response.json()
+
+def check_user_responses():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute('''
+        SELECT * FROM users
+        WHERE last_response < %s OR last_response IS NULL
+    ''', (datetime.now(pytz.utc).date() - timedelta(days=1),))
+    users = cur.fetchall()
+
+    for user in users:
+        user['consecutive_misses'] += 1
+        if user['consecutive_misses'] >= 2:
+            send_sms(user['emergency_contact'], f"Please check on {user['phone_number']}. They haven't responded to their goal tracker in 2 days.")
+            user['consecutive_misses'] = 0
+
+        cur.execute('''
+            UPDATE users
+            SET consecutive_misses = %s
+            WHERE phone_number = %s
+        ''', (user['consecutive_misses'], user['phone_number']))
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 def send_daily_message():
-    """Send daily message to all users at 8 AM EST."""
-    users = User.query.all()
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute('SELECT phone_number FROM users')
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
     for user in users:
-        message = client.messages.create(
-            body="Did you accomplish yesterday's goals? What are your goals for today?",
-            from_=os.getenv('TWILIO_PHONE_NUMBER'),
-            to=user.phone_number
-        )
+        send_sms(user['phone_number'], "What are your goals for today? Did you accomplish yesterday's goals? Reply STOP to opt-out.")
 
-def check_user_status():
-    """Check if users haven't responded or completed goals for 2 days."""
-    est = pytz.timezone('US/Eastern')
-    now = datetime.now(est)
-    two_days_ago = now - timedelta(days=2)
+scheduler = BackgroundScheduler()
+scheduler.add_job(send_daily_message, 'cron', hour=8, timezone='US/Eastern')
+scheduler.add_job(check_user_responses, 'cron', hour=0, timezone='US/Eastern')
+scheduler.start()
 
-    users = User.query.filter((User.last_response < two_days_ago) | (User.goals_completed == False)).all()
-    for user in users:
-        if user.contact_number:
-            message = client.messages.create(
-                body=f"Please check in on {user.phone_number}. They haven't been responding to their goal tracking messages.",
-                from_=os.getenv('TWILIO_PHONE_NUMBER'),
-                to=user.contact_number
-            )
+def verify_webhook(timestamp, signature, payload):
+    my_signature = hmac.new(
+        TEXTBELT_API_KEY.encode('utf-8'),
+        (timestamp + payload).encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, my_signature)
 
-@app.route("/register", methods=['GET', 'POST'])
-def register_user():
-    if request.method == 'POST':
-        phone_number = request.form.get('phone_number')
-        contact_number = request.form.get('contact_number')
+@app.route("/sms_reply", methods=['POST'])
+def sms_reply():
+    timestamp = request.headers.get('X-textbelt-timestamp')
+    signature = request.headers.get('X-textbelt-signature')
+    payload = request.get_data(as_text=True)
+
+    if not verify_webhook(timestamp, signature, payload):
+        return jsonify({"error": "Invalid signature"}), 400
+
+    data = request.json
+    phone_number = data['fromNumber']
+    message_body = data['text'].lower()
+
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+
+    cur.execute('SELECT * FROM users WHERE phone_number = %s', (phone_number,))
+    user = cur.fetchone()
+
+    if user:
+        cur.execute('''
+            UPDATE users
+            SET last_response = %s, consecutive_misses = 0
+            WHERE phone_number = %s
+        ''', (datetime.now(pytz.utc).date(), phone_number))
+        conn.commit()
+        response_message = "Thank you for your update! Keep up the good work!"
+    else:
+        response_message = "You're not registered. Send 'register' followed by your emergency contact's number to start goal tracking."
+
+    cur.close()
+    conn.close()
+
+    send_sms(phone_number, response_message)
+    return '', 204
+
+REGISTER_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Register for SMS Goal Tracker</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }
+        form { max-width: 400px; margin: 0 auto; }
+        label { display: block; margin-bottom: 5px; }
+        input[type="tel"] { width: 100%; padding: 8px; margin-bottom: 10px; }
+        input[type="submit"] { background-color: #4CAF50; color: white; padding: 10px 15px; border: none; cursor: pointer; }
+        input[type="submit"]:hover { background-color: #45a049; }
+    </style>
+</head>
+<body>
+    <h1>Register for SMS Goal Tracker</h1>
+    <form method="POST">
+        <label for="phone">Your Phone Number:</label>
+        <input type="tel" id="phone" name="phone" required placeholder="+1XXXXXXXXXX">
         
-        if not phone_number or not contact_number:
-            return jsonify({"error": "Both phone number and contact number are required"}), 400
+        <label for="emergency_contact">Emergency Contact Phone Number:</label>
+        <input type="tel" id="emergency_contact" name="emergency_contact" required placeholder="+1XXXXXXXXXX">
         
-        user = User.query.filter_by(phone_number=phone_number).first()
-        if user:
-            return jsonify({"error": "User already registered"}), 400
-        
-        new_user = User(phone_number=phone_number, contact_number=contact_number)
-        db.session.add(new_user)
-        db.session.commit()
-        
-        return jsonify({"message": "User registered successfully"}), 200
-    
-    # If it's a GET request, render a simple HTML form
-    return '''
-    <form method="post">
-        <label for="phone_number">Phone Number:</label><br>
-        <input type="text" id="phone_number" name="phone_number" required><br>
-        <label for="contact_number">Contact Number:</label><br>
-        <input type="text" id="contact_number" name="contact_number" required><br>
         <input type="submit" value="Register">
     </form>
-    '''
+</body>
+</html>
+'''
 
-def create_tables():
-    with app.app_context():
-        db.create_all()
+@app.route("/register", methods=['GET', 'POST'])
+def register():
+    if request.method == 'GET':
+        return render_template_string(REGISTER_TEMPLATE)
+    
+    phone_number = request.form.get('phone')
+    emergency_contact = request.form.get('emergency_contact')
+
+    if not phone_number or not emergency_contact:
+        return "Missing phone number or emergency contact", 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute('INSERT INTO users (phone_number, emergency_contact) VALUES (%s, %s)',
+                    (phone_number, emergency_contact))
+        conn.commit()
+        send_sms(phone_number, "You've been registered for SMS Goal Tracker! We'll start tracking your goals tomorrow. Reply STOP to opt-out at any time.")
+        return "Registration successful! You'll receive a confirmation SMS shortly.", 201
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return "This phone number is already registered.", 400
+    except Exception as e:
+        conn.rollback()
+        return f"An error occurred: {str(e)}", 500
+    finally:
+        cur.close()
+        conn.close()
 
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()  # Create database tables
-    
-    scheduler = BackgroundScheduler(timezone=pytz.timezone('US/Eastern'))
-    scheduler.add_job(send_daily_message, 'cron', hour=8, minute=0)
-    scheduler.add_job(check_user_status, 'interval', hours=12)
-    scheduler.start()
-    create_tables()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(debug=True)
