@@ -110,6 +110,11 @@ def verify_webhook(timestamp, signature, payload):
     ).hexdigest()
     return hmac.compare_digest(signature, my_signature)
 
+@app.route('/test_daily_message')
+def test_daily_message():
+    send_daily_message()
+    return "Daily message sent", 200
+
 @app.route("/sms_reply", methods=['POST'])
 def sms_reply():
     timestamp = request.headers.get('X-textbelt-timestamp')
