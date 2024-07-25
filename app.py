@@ -87,7 +87,7 @@ def send_daily_message():
         send_sms(user['phone_number'], "What are your goals for today? Did you accomplish yesterday's goals? Reply STOP to opt-out.")
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_daily_message, 'cron', hour=8, timezone='US/Eastern')
+scheduler.add_job(send_daily_message, 'cron', hour=8, minute=30, timezone='US/Eastern')
 scheduler.add_job(check_user_responses, 'cron', hour=0, timezone='US/Eastern')
 scheduler.start()
 
