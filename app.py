@@ -98,7 +98,7 @@ def check_user_responses():
     conn.close()
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_daily_message, 'cron', hour=8, minute=30, timezone='US/Eastern')
+scheduler.add_job(send_daily_message, 'cron', hour=9, minute=00, timezone='US/Eastern')
 scheduler.add_job(check_user_responses, 'cron', hour=0, timezone='US/Eastern')
 scheduler.start()
 
