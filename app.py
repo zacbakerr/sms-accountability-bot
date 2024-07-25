@@ -2,7 +2,7 @@
 import os
 import hmac
 import hashlib
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import pytz
@@ -15,6 +15,8 @@ app = Flask(__name__)
 # TextBelt configuration
 TEXTBELT_API_KEY = os.environ['TEXTBELT_API_KEY']
 TEXTBELT_URL = 'https://textbelt.com/text'
+
+APP_URL = os.environ.get('APP_URL', 'https://sms-accountability-fe82d1eb3ade.herokuapp.com')
 
 # Database configuration
 DATABASE_URL = os.environ['DATABASE_URL']
@@ -44,11 +46,31 @@ def send_sms(to_number, message):
         'phone': to_number,
         'message': message,
         'key': TEXTBELT_API_KEY,
-        'replyWebhookUrl': f"{request.url_root}sms_reply",
-        'sender': 'GoalTracker'  # Replace with your business/organization name
+        'replyWebhookUrl': f"{APP_URL}/sms_reply",
+        'sender': 'GoalTracker'
     }
-    response = requests.post(TEXTBELT_URL, data=payload)
-    return response.json()
+    try:
+        response = requests.post(TEXTBELT_URL, data=payload)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending SMS: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+def send_daily_message():
+    print(f"send_daily_message started at {datetime.now()}")
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute('SELECT phone_number FROM users')
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    for user in users:
+        result = send_sms(user['phone_number'], "What are your goals for today? Did you accomplish yesterday's goals? Reply STOP to opt-out.")
+        print(f"SMS sent to {user['phone_number']}: {result}")
+
+    print(f"send_daily_message completed at {datetime.now()}")
 
 def check_user_responses():
     conn = get_db_connection()
@@ -74,17 +96,6 @@ def check_user_responses():
     conn.commit()
     cur.close()
     conn.close()
-
-def send_daily_message():
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute('SELECT phone_number FROM users')
-    users = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    for user in users:
-        send_sms(user['phone_number'], "What are your goals for today? Did you accomplish yesterday's goals? Reply STOP to opt-out.")
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(send_daily_message, 'cron', hour=8, minute=30, timezone='US/Eastern')
