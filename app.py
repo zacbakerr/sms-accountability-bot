@@ -96,6 +96,8 @@ Based on this history, craft a message that:
 4. Asks if they completed yesterday's goals (if applicable)
 
 Keep the message concise (maximum 160 characters) and conversational, as it will be sent via SMS.
+
+\n\nAssistant:
 """
 
     response = claude_client.completions.create(
