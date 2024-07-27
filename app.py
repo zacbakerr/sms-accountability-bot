@@ -85,7 +85,7 @@ def generate_claude_message(phone_number):
     goals = get_user_goals(phone_number)
     goals_history = "\n".join([f"Date: {goal['date']}, Goals: {goal['goals']}, Status: {goal['completion_status']}" for goal in goals])
     
-    prompt = f"""You are an AI assistant for a goal-tracking SMS service. Your task is to engage with the user about their goals in a friendly, motivational manner. Here's the user's recent goal history:
+    prompt = f"""\n\nHuman: You are an AI assistant for a goal-tracking SMS service. Your task is to engage with the user about their goals in a friendly, motivational manner. Here's the user's recent goal history:
 
 {goals_history}
 
