@@ -1,7 +1,7 @@
 import os
 import hmac
 import hashlib
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import pytz
@@ -95,7 +95,7 @@ Based on this history, craft a message that:
 3. Provides encouragement or advice based on their past performance
 4. Asks if they completed yesterday's goals (if applicable)
 
-Keep the message concise (maximum 160 characters) and conversational, as it will be sent via SMS.
+Keep the message concise (maximum 160 characters) and conversational, as it will be sent via SMS. If you don't have a lot of information, ask what they're working on. Include NOTHING but the message as it will be sent directly to the user.
 
 \n\nAssistant:
 """
@@ -144,6 +144,135 @@ def store_user_response(phone_number, message):
     conn.commit()
     cur.close()
     conn.close()
+
+REGISTER_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register for GoalMaster AI</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #ffffff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            width: 90%;
+            max-width: 400px;
+        }
+        h1 {
+            text-align: center;
+            color: #4cc9f0;
+            margin-bottom: 1.5rem;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+        }
+        input {
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            border: none;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            color: #ffffff;
+        }
+        input::placeholder {
+            color: rgba(255, 255, 255, 0.7);
+        }
+        button {
+            background: #4cc9f0;
+            color: #1a1a2e;
+            border: none;
+            padding: 0.7rem;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.3s ease;
+        }
+        button:hover {
+            background: #3a86ff;
+        }
+        .features {
+            margin-top: 2rem;
+            text-align: center;
+        }
+        .features h2 {
+            color: #4cc9f0;
+        }
+        .features ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        .features li {
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>GoalMaster AI</h1>
+        <form method="POST">
+            <input type="tel" name="phone" required placeholder="Your Phone Number">
+            <input type="tel" name="emergency_contact" required placeholder="Emergency Contact Number">
+            <button type="submit">Register</button>
+        </form>
+        <div class="features">
+            <h2>First AI-Powered SMS Accountability App</h2>
+            <ul>
+                <li>Daily AI-generated check-ins</li>
+                <li>Personalized goal tracking</li>
+                <li>Smart accountability system</li>
+                <li>Seamless SMS integration</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+@app.route("/register", methods=['GET', 'POST'])
+def register():
+    if request.method == 'GET':
+        return render_template_string(REGISTER_TEMPLATE)
+    
+    phone_number = request.form.get('phone')
+    emergency_contact = request.form.get('emergency_contact')
+
+    if not phone_number or not emergency_contact:
+        return "Missing phone number or emergency contact", 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute('INSERT INTO users (phone_number, emergency_contact) VALUES (%s, %s)',
+                    (phone_number, emergency_contact))
+        conn.commit()
+        send_sms(phone_number, "You've been registered for SMS Goal Tracker! We'll start tracking your goals tomorrow. Reply STOP to opt-out at any time.")
+        return "Registration successful! You'll receive a confirmation SMS shortly.", 201
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return "This phone number is already registered.", 400
+    except Exception as e:
+        conn.rollback()
+        return f"An error occurred: {str(e)}", 500
+    finally:
+        cur.close()
+        conn.close()
 
 @app.route('/test_daily_message')
 def test_daily_message():
