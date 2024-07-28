@@ -85,7 +85,11 @@ def send_sms(to_number, message):
         'key': TEXTBELT_API_KEY
     }
     try:
-        response = requests.post(TEXTBELT_URL, data=payload)
+        response = requests.post('https://textbelt.com/text', data={
+            'phone': to_number,
+            'message': message,
+            'key': TEXTBELT_API_KEY
+        })
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -223,6 +227,7 @@ def send_daily_message():
 
     for user in users:
         message = generate_daily_message(user['phone_number'])
+        print(message)
         result = send_sms(user['phone_number'], message)
         print(f"SMS sent to {user['phone_number']}: {result}")
 
