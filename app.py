@@ -45,6 +45,10 @@ def init_db():
             completion_status JSONB
         )
     ''')
+    cur.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_goals_phone_date 
+        ON daily_goals (phone_number, date)
+    ''')
     conn.commit()
     cur.close()
     conn.close()
@@ -162,25 +166,30 @@ def update_user_goals(phone_number, met_goals, new_goals):
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Update completion status for yesterday's goals
-    yesterday = today - timedelta(days=1)
-    cur.execute("""
-        UPDATE daily_goals 
-        SET completion_status = completion_status || %s
-        WHERE phone_number = %s AND date = %s
-    """, (json.dumps({goal: True for goal in met_goals}), phone_number, yesterday))
+    try:
+        # Update completion status for yesterday's goals
+        yesterday = today - timedelta(days=1)
+        cur.execute("""
+            UPDATE daily_goals 
+            SET completion_status = daily_goals.completion_status || %s::jsonb
+            WHERE phone_number = %s AND date = %s
+        """, (json.dumps({goal: True for goal in met_goals}), phone_number, yesterday))
 
-    # Insert new goals for today
-    cur.execute("""
-        INSERT INTO daily_goals (phone_number, date, goals, completion_status)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (phone_number, date) DO UPDATE
-        SET goals = daily_goals.goals || %s
-    """, (phone_number, today, json.dumps(new_goals), json.dumps({}), json.dumps(new_goals)))
-    
-    conn.commit()
-    cur.close()
-    conn.close()
+        # Insert new goals for today
+        cur.execute("""
+            INSERT INTO daily_goals (phone_number, date, goals, completion_status)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (phone_number, date) 
+            DO UPDATE SET goals = daily_goals.goals || %s::jsonb
+        """, (phone_number, today, json.dumps(new_goals), json.dumps({}), json.dumps(new_goals)))
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error updating user goals: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
 
 def send_daily_message():
     print(f"send_daily_message started at {datetime.now()}")
@@ -358,10 +367,14 @@ def sms_reply():
     phone_number = data['fromNumber']
     message_body = data['text']
 
-    result = process_user_response(phone_number, message_body)
-    update_user_goals(phone_number, result['met_goals'], result['new_goals'])
+    try:
+        result = process_user_response(phone_number, message_body)
+        update_user_goals(phone_number, result['met_goals'], result['new_goals'])
+        send_sms(phone_number, result['response'])
+    except Exception as e:
+        print(f"Error processing SMS reply: {str(e)}")
+        send_sms(phone_number, "I'm sorry, I encountered an error processing your message. Please try again later.")
 
-    send_sms(phone_number, result['response'])
     return '', 204
 
 scheduler = BackgroundScheduler()
