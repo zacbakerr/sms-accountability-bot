@@ -10,6 +10,7 @@ from psycopg2.extras import DictCursor
 import requests
 import json
 import anthropic
+import re
 
 app = Flask(__name__)
 
@@ -36,12 +37,12 @@ def init_db():
         )
     ''')
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS goals (
+        CREATE TABLE IF NOT EXISTS daily_goals (
             id SERIAL PRIMARY KEY,
             phone_number TEXT REFERENCES users(phone_number),
             date DATE,
-            goals TEXT,
-            completion_status TEXT
+            goals JSONB,
+            completion_status JSONB
         )
     ''')
     conn.commit()
@@ -66,12 +67,12 @@ def send_sms(to_number, message):
         print(f"Error sending SMS: {str(e)}")
         return {"success": False, "error": str(e)}
 
-def get_user_goals(phone_number, days=7):
+def get_user_goals(phone_number, days=1):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
     cur.execute('''
         SELECT date, goals, completion_status 
-        FROM goals 
+        FROM daily_goals 
         WHERE phone_number = %s 
         AND date >= CURRENT_DATE - INTERVAL '%s days'
         ORDER BY date DESC
@@ -81,24 +82,29 @@ def get_user_goals(phone_number, days=7):
     conn.close()
     return goals
 
-def generate_claude_message(phone_number):
-    goals = get_user_goals(phone_number)
-    goals_history = "\n".join([f"Date: {goal['date']}, Goals: {goal['goals']}, Status: {goal['completion_status']}" for goal in goals])
+def parse_goals(message):
+    # Simple parsing: assumes goals are separated by newlines or commas
+    goals = re.split(r'[,\n]', message)
+    return [goal.strip() for goal in goals if goal.strip()]
+
+def generate_daily_message(phone_number):
+    yesterday_goals = get_user_goals(phone_number)
     
-    prompt = f"""\n\nHuman: You are an AI assistant for a goal-tracking SMS service. Your task is to engage with the user about their goals in a friendly, motivational manner. Here's the user's recent goal history:
+    if yesterday_goals:
+        yesterday = yesterday_goals[0]
+        goals_list = yesterday['goals']
+        goals_summary = "\n".join(goals_list)
+        prompt = f"""Human: You are an AI assistant for a goal-tracking SMS service. Yesterday's goals were:
 
-{goals_history}
+{goals_summary}
 
-Based on this history, craft a message that:
-1. Acknowledges their recent progress or challenges
-2. Asks about their goals for today
-3. Provides encouragement or advice based on their past performance
-4. Asks if they completed yesterday's goals (if applicable)
+Ask the user if they met these goals and what their goals are for today. Be brief and encouraging. Limit your response to 160 characters.
 
-Keep the message concise (maximum 160 characters) and conversational, as it will be sent via SMS. If you don't have a lot of information, ask what they're working on. Include NOTHING but the message as it will be sent directly to the user.
+Assistant: """
+    else:
+        prompt = """Human: You are an AI assistant for a goal-tracking SMS service. This is the user's first day. Ask them what their goals are for today. Be brief and encouraging. Limit your response to 160 characters.
 
-\n\nAssistant:
-"""
+Assistant: """
 
     response = claude_client.completions.create(
         model="claude-2",
@@ -108,6 +114,73 @@ Keep the message concise (maximum 160 characters) and conversational, as it will
     )
     
     return response.completion.strip()
+
+def process_user_response(phone_number, message):
+    yesterday_goals = get_user_goals(phone_number)
+    
+    if yesterday_goals:
+        yesterday = yesterday_goals[0]
+        goals_list = yesterday['goals']
+        goals_summary = "\n".join(goals_list)
+    else:
+        goals_summary = "No previous goals found."
+
+    prompt = f"""Human: You are an AI assistant for a goal-tracking SMS service. The user's previous goals were:
+
+{goals_summary}
+
+The user's response is:
+
+{message}
+
+Analyze the response to determine:
+1. Which goals were met (if any)
+2. Any new goals mentioned
+3. A brief, encouraging response to the user (max 160 characters)
+
+Format your response as JSON with keys: "met_goals", "new_goals", and "response".
+
+Assistant: """
+
+    response = claude_client.completions.create(
+        model="claude-2",
+        prompt=prompt,
+        max_tokens_to_sample=500,
+        temperature=0.7
+    )
+    
+    try:
+        result = json.loads(response.completion.strip())
+        return result
+    except json.JSONDecodeError:
+        print(f"Error decoding JSON from Claude's response: {response.completion.strip()}")
+        return {"met_goals": [], "new_goals": [], "response": "I couldn't process your response. Can you please rephrase it?"}
+    
+
+def update_user_goals(phone_number, met_goals, new_goals):
+    today = datetime.now().date()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Update completion status for yesterday's goals
+    yesterday = today - timedelta(days=1)
+    cur.execute("""
+        UPDATE daily_goals 
+        SET completion_status = completion_status || %s
+        WHERE phone_number = %s AND date = %s
+    """, (json.dumps({goal: True for goal in met_goals}), phone_number, yesterday))
+
+    # Insert new goals for today
+    cur.execute("""
+        INSERT INTO daily_goals (phone_number, date, goals, completion_status)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (phone_number, date) DO UPDATE
+        SET goals = daily_goals.goals || %s
+    """, (phone_number, today, json.dumps(new_goals), json.dumps({}), json.dumps(new_goals)))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
 
 def send_daily_message():
     print(f"send_daily_message started at {datetime.now()}")
@@ -119,7 +192,7 @@ def send_daily_message():
     conn.close()
 
     for user in users:
-        message = generate_claude_message(user['phone_number'])
+        message = generate_daily_message(user['phone_number'])
         result = send_sms(user['phone_number'], message)
         print(f"SMS sent to {user['phone_number']}: {result}")
 
@@ -224,19 +297,19 @@ REGISTER_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>GoalMaster AI</h1>
+        <h1>Accountability AI</h1>
         <form method="POST">
-            <input type="tel" name="phone" required placeholder="Your Phone Number">
-            <input type="tel" name="emergency_contact" required placeholder="Emergency Contact Number">
+            <input type="tel" name="phone" required placeholder="Your Phone Number...">
+            <input type="tel" name="emergency_contact" required placeholder="Emergency Contact Number...">
             <button type="submit">Register</button>
         </form>
         <div class="features">
             <h2>First AI-Powered SMS Accountability App</h2>
             <ul>
-                <li>Daily AI-generated check-ins</li>
-                <li>Personalized goal tracking</li>
-                <li>Smart accountability system</li>
-                <li>Seamless SMS integration</li>
+                <li>- Daily AI-generated check-ins</li>
+                <li>- Personalized goal tracking</li>
+                <li>- Link to a friend for ensured-accountability</li>
+                <li>- Seamless SMS integration</li>
             </ul>
         </div>
     </div>
@@ -285,11 +358,10 @@ def sms_reply():
     phone_number = data['fromNumber']
     message_body = data['text']
 
-    store_user_response(phone_number, message_body)
+    result = process_user_response(phone_number, message_body)
+    update_user_goals(phone_number, result['met_goals'], result['new_goals'])
 
-    response_message = generate_claude_message(phone_number)
-
-    send_sms(phone_number, response_message)
+    send_sms(phone_number, result['response'])
     return '', 204
 
 scheduler = BackgroundScheduler()
