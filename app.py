@@ -29,29 +29,52 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            phone_number TEXT PRIMARY KEY,
-            emergency_contact TEXT,
-            last_response DATE
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS daily_goals (
-            id SERIAL PRIMARY KEY,
-            phone_number TEXT REFERENCES users(phone_number),
-            date DATE,
-            goals JSONB,
-            completion_status JSONB
-        )
-    ''')
-    cur.execute('''
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_goals_phone_date 
-        ON daily_goals (phone_number, date)
-    ''')
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        # Create users table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                phone_number TEXT PRIMARY KEY,
+                emergency_contact TEXT,
+                last_response DATE
+            )
+        ''')
+        
+        # Create daily_goals table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS daily_goals (
+                id SERIAL PRIMARY KEY,
+                phone_number TEXT REFERENCES users(phone_number),
+                date DATE,
+                goals JSONB,
+                completion_status JSONB
+            )
+        ''')
+        
+        # Check if the index exists before creating it
+        cur.execute('''
+            SELECT 1
+            FROM pg_indexes
+            WHERE indexname = 'idx_daily_goals_phone_date'
+        ''')
+        
+        if cur.fetchone() is None:
+            # Create the index if it doesn't exist
+            cur.execute('''
+                CREATE UNIQUE INDEX idx_daily_goals_phone_date 
+                ON daily_goals (phone_number, date)
+            ''')
+            print("Created index idx_daily_goals_phone_date")
+        else:
+            print("Index idx_daily_goals_phone_date already exists")
+        
+        conn.commit()
+        print("Database initialization completed successfully")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error during database initialization: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
 
 init_db()
 
