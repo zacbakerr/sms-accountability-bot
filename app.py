@@ -82,9 +82,7 @@ def send_sms(to_number, message):
     payload = {
         'phone': to_number,
         'message': message,
-        'key': TEXTBELT_API_KEY,
-        'replyWebhookUrl': f"{APP_URL}/sms_reply",
-        'sender': 'GoalTracker'
+        'key': TEXTBELT_API_KEY
     }
     try:
         response = requests.post(TEXTBELT_URL, data=payload)
@@ -178,7 +176,7 @@ Assistant: """
     
     try:
         result = json.loads(response.completion.strip())
-        return result
+        return result['response']
     except json.JSONDecodeError:
         print(f"Error decoding JSON from Claude's response: {response.completion.strip()}")
         return {"met_goals": [], "new_goals": [], "response": "I couldn't process your response. Can you please rephrase it?"}
@@ -393,10 +391,15 @@ def sms_reply():
     try:
         result = process_user_response(phone_number, message_body)
         update_user_goals(phone_number, result['met_goals'], result['new_goals'])
-        send_sms(phone_number, result['response'])
     except Exception as e:
         print(f"Error processing SMS reply: {str(e)}")
-        send_sms(phone_number, "I'm sorry, I encountered an error processing your message. Please try again later.")
+        result = {
+            "response": "I'm sorry, I encountered an error processing your message. Please try again later."
+        }
+    
+    # Always attempt to send an SMS response
+    sms_result = send_sms(phone_number, result['response'])
+    print(f"SMS sent to {phone_number}: {sms_result}")
 
     return '', 204
 
