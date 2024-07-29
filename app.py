@@ -1,10 +1,7 @@
 import os
-import hmac
-import hashlib
 from flask import Flask, request, jsonify, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
-import pytz
 import psycopg2
 from psycopg2.extras import DictCursor
 import requests
@@ -82,19 +79,17 @@ def send_sms(to_number, message):
     payload = {
         'phone': to_number,
         'message': message,
-        'key': TEXTBELT_API_KEY
+        'key': TEXTBELT_API_KEY,
+        'replyWebhookUrl': f"{APP_URL}/api/handle_sms_reply"
     }
     try:
-        response = requests.post('https://textbelt.com/text', data={
-            'phone': to_number,
-            'message': message,
-            'key': TEXTBELT_API_KEY
-        })
+        response = requests.post(TEXTBELT_URL, data=payload)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         print(f"Error sending SMS: {str(e)}")
         return {"success": False, "error": str(e)}
+
 
 def get_user_goals(phone_number, days=1):
     conn = get_db_connection()
@@ -186,6 +181,42 @@ Assistant: """
         return {"met_goals": [], "new_goals": [], "response": "I couldn't process your response. Can you please rephrase it?"}
     
 
+@app.route("/api/handle_sms_reply", methods=['POST'])
+def handle_sms_reply():
+    data = request.json
+    if not data:
+        return "Invalid data", 400
+
+    text_id = data.get('textId')
+    from_number = data.get('fromNumber')
+    message_body = data.get('text')
+
+    if not all([text_id, from_number, message_body]):
+        return "Missing required fields", 400
+
+    try:
+        # Process the incoming SMS reply
+        result = process_user_response(from_number, message_body)
+        update_user_goals(from_number, result['met_goals'], result['new_goals'])
+        
+        # Update last_response date
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET last_response = %s WHERE phone_number = %s', (datetime.now().date(), from_number))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        # Send a response back to the user if needed
+        if result.get('response'):
+            send_sms(from_number, result['response'])
+        
+        print(f"Processed SMS reply from {from_number}: {message_body}")
+        return "OK", 200
+    except Exception as e:
+        print(f"Error processing SMS reply: {str(e)}")
+        return "Internal server error", 500
+
 def update_user_goals(phone_number, met_goals, new_goals):
     today = datetime.now().date()
     conn = get_db_connection()
@@ -216,11 +247,38 @@ def update_user_goals(phone_number, met_goals, new_goals):
         cur.close()
         conn.close()
 
+def check_inactivity_and_notify():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    
+    # Get users who haven't responded in the last 3 days
+    three_days_ago = datetime.now().date() - timedelta(days=3)
+    cur.execute('''
+        SELECT u.phone_number, u.emergency_contact, u.last_response
+        FROM users u
+        WHERE u.last_response < %s OR u.last_response IS NULL
+    ''', (three_days_ago,))
+    
+    inactive_users = cur.fetchall()
+    
+    for user in inactive_users:
+        # Prepare message for emergency contact
+        days_inactive = (datetime.now().date() - user['last_response']).days if user['last_response'] else 'several'
+        message = f"Emergency Alert: {user['phone_number']} has been inactive for {days_inactive} days on their goal tracking app."
+        
+        # Send message to emergency contact
+        send_sms(user['emergency_contact'], message)
+        
+        print(f"Sent inactivity alert for {user['phone_number']} to {user['emergency_contact']}")
+    
+    cur.close()
+    conn.close()
+
 def send_daily_message():
     print(f"send_daily_message started at {datetime.now()}")
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute('SELECT phone_number FROM users')
+    cur.execute('SELECT phone_number, last_response FROM users WHERE subscription_status = %s', ('active',))
     users = cur.fetchall()
     cur.close()
     conn.close()
@@ -230,6 +288,9 @@ def send_daily_message():
         print(message)
         result = send_sms(user['phone_number'], message)
         print(f"SMS sent to {user['phone_number']}: {result}")
+        
+        if user['last_response'] is None or (datetime.now().date() - user['last_response']).days >= 3:
+            check_inactivity_and_notify()
 
     print(f"send_daily_message completed at {datetime.now()}")
 
@@ -396,6 +457,15 @@ def sms_reply():
     try:
         result = process_user_response(phone_number, message_body)
         update_user_goals(phone_number, result['met_goals'], result['new_goals'])
+        
+        # Update last_response date
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET last_response = %s WHERE phone_number = %s', (datetime.now().date(), phone_number))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
     except Exception as e:
         print(f"Error processing SMS reply: {str(e)}")
         result = {
@@ -409,7 +479,8 @@ def sms_reply():
     return '', 204
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_daily_message, 'cron', hour=8, minute=30, timezone='US/Eastern')
+scheduler.add_job(send_daily_message, 'cron', hour=9, minute=0, timezone='US/Eastern')
+scheduler.add_job(check_inactivity_and_notify, 'cron', hour=9, minute=0, timezone='US/Eastern')
 scheduler.start()
 
 if __name__ == "__main__":
