@@ -219,15 +219,18 @@ def sms_reply():
     # Use Claude to respond like a helpful assistant
     yesterday_goals = get_user_goals(phone_number, yesterday)
     if yesterday_goals:
-      goals_context = ', '.join(yesterday_goals['goals'])
-      assistant_prompt = f"The user's goals are: {goals_context}. They sent: '{message_body}'. Respond like a helpful assistant trying to help them accomplish their goals and keep them on task."
+        goals_context = ', '.join(yesterday_goals['goals'])
+        assistant_prompt = f"The user's goals are: {goals_context}. They sent: '{message_body}'. Respond like a helpful assistant trying to help them accomplish their goals and keep them on task."
     else:
-      assistant_prompt = f"The user sent: '{message_body}'. Respond like a helpful assistant trying to help them accomplish their goals and keep them on task."
-    claude_response = claude_client.complete(
-      prompt=assistant_prompt,
-      max_tokens_to_sample=100
+        assistant_prompt = f"The user sent: '{message_body}'. Respond like a helpful assistant trying to help them accomplish their goals and keep them on task."
+
+    claude_response = claude_client.completions.create(
+        model="claude-2",
+        prompt=f"{anthropic.HUMAN_PROMPT} {assistant_prompt} {anthropic.AI_PROMPT}",
+        max_tokens_to_sample=100,
+        temperature=0.7
     )
-    response = claude_response['completion']
+    response = claude_response.completion
 
   send_sms(phone_number, response)
 
