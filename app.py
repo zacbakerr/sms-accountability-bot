@@ -113,10 +113,40 @@ def send_evening_followup():
   yesterday = datetime.now().date() - timedelta(days=1)
   for user in users:
     yesterday_goals = get_user_goals(user['phone_number'], yesterday)
+    incomplete_goals = get_incomplete_goals(user['phone_number'])
+    
+    all_goals = []
     if yesterday_goals and yesterday_goals['goals']:
-      goals_list = ', '.join(yesterday_goals['goals'])
-      message = f"Yesterday, your goals were: {goals_list}. Did you meet them? Please respond with Yes/No for each goal, separated by commas."
+      all_goals.extend(yesterday_goals['goals'])
+    if incomplete_goals:
+      all_goals.extend(incomplete_goals)
+    
+    if all_goals:
+      goals_list = ', '.join(all_goals)
+      message = f"Your goals to review are: {goals_list}. Did you meet them? Please respond with Yes/No for each goal, separated by commas."
       send_sms(user['phone_number'], message)
+
+def get_incomplete_goals(phone_number):
+  conn = get_db_connection()
+  cur = conn.cursor(cursor_factory=DictCursor)
+  cur.execute('''
+    SELECT goals, completion_status
+    FROM daily_goals
+    WHERE phone_number = %s AND date < %s
+    ORDER BY date DESC
+  ''', (phone_number, datetime.now().date()))
+  
+  incomplete_goals = []
+  for row in cur.fetchall():
+    goals = json.loads(row['goals'])
+    completion_status = json.loads(row['completion_status'])
+    for goal, status in zip(goals, completion_status):
+      if status == False and goal not in incomplete_goals:
+        incomplete_goals.append(goal)
+  
+  cur.close()
+  conn.close()
+  return incomplete_goals
 
 def check_inactivity_and_notify():
   conn = get_db_connection()
@@ -248,56 +278,97 @@ REGISTER_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Register for GoalMaster AI</title>
-  <style>
-    body {
-      font-family: 'Arial', sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-      color: #ffffff;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      margin: 0;
-    }
-    .container {
-      background: rgba(0, 0, 0, 0.6);
-      padding: 20px;
-      border-radius: 10px;
-      box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
-      width: 100%;
-      max-width: 500px;
-      text-align: center;
-    }
-    input[type="text"], input[type="submit"] {
-      width: 100%;
-      padding: 10px;
-      margin: 10px 0;
-      border: none;
-      border-radius: 5px;
-    }
-    input[type="submit"] {
-      background-color: #28a745;
-      color: white;
-      cursor: pointer;
-      transition: background-color 0.3s ease;
-    }
-    input[type="submit"]:hover {
-      background-color: #218838;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register for GoalMaster AI</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #ffffff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            width: 90%;
+            max-width: 400px;
+        }
+        h1 {
+            text-align: center;
+            color: #4cc9f0;
+            margin-bottom: 1.5rem;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+        }
+        input {
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            border: none;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            color: #ffffff;
+        }
+        input::placeholder {
+            color: rgba(255, 255, 255, 0.7);
+        }
+        button {
+            background: #4cc9f0;
+            color: #1a1a2e;
+            border: none;
+            padding: 0.7rem;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.3s ease;
+        }
+        button:hover {
+            background: #3a86ff;
+        }
+        .features {
+            margin-top: 2rem;
+            text-align: center;
+        }
+        .features h2 {
+            color: #4cc9f0;
+        }
+        .features ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        .features li {
+            margin-bottom: 0.5rem;
+        }
+    </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Register for GoalMaster AI</h1>
-    <form action="/register" method="POST">
-      <input type="text" name="phone_number" placeholder="Your Phone Number" required>
-      <input type="text" name="emergency_contact" placeholder="Emergency Contact Number" required>
-      <input type="submit" value="Register">
-    </form>
-  </div>
+    <div class="container">
+        <h1>Accountability AI</h1>
+        <form method="POST">
+            <input type="tel" name="phone" required placeholder="Your Phone Number...">
+            <input type="tel" name="emergency_contact" required placeholder="Emergency Contact Number...">
+            <button type="submit">Register</button>
+        </form>
+        <div class="features">
+            <h2>First AI-Powered SMS Accountability App</h2>
+            <ul>
+                <li>- Daily AI-generated check-ins</li>
+                <li>- Personalized goal tracking</li>
+                <li>- Link to a friend for ensured-accountability</li>
+                <li>- Seamless SMS integration</li>
+            </ul>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -342,8 +413,10 @@ def register_user():
 
 if __name__ == '__main__':
   scheduler = BackgroundScheduler()
-  scheduler.add_job(send_morning_message, 'cron', hour=9, minute=0)
-  scheduler.add_job(send_evening_followup, 'cron', hour=18, minute=0)
+  scheduler.add_job(send_morning_message, 'cron', hour=7, minute=0)
+  scheduler.add_job(send_evening_followup, 'cron', hour=10, minute=0)
+  scheduler.add_job(send_evening_followup, 'cron', hour=15, minute=0)
+  scheduler.add_job(send_evening_followup, 'cron', hour=20, minute=0)
   scheduler.add_job(check_inactivity_and_notify, 'cron', hour=12, minute=0)
   scheduler.start()
 
