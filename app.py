@@ -32,7 +32,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 phone_number TEXT PRIMARY KEY,
                 emergency_contact TEXT,
-                last_response DATE
+                last_response DATE,
+                subscription_status TEXT DEFAULT 'active'
             )
         ''')
         
@@ -42,8 +43,8 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 phone_number TEXT REFERENCES users(phone_number),
                 date DATE,
-                goals JSONB,
-                completion_status JSONB
+                goals TEXT[],
+                completion_status BOOLEAN[]
             )
         ''')
         
@@ -80,7 +81,7 @@ def send_sms(to_number, message):
         'phone': to_number,
         'message': message,
         'key': TEXTBELT_API_KEY,
-        'replyWebhookUrl': f"{APP_URL}/api/handle_sms_reply"
+        'replyWebhookUrl': f"{APP_URL}/sms_reply"
     }
     try:
         response = requests.post(TEXTBELT_URL, data=payload)
@@ -90,162 +91,71 @@ def send_sms(to_number, message):
         print(f"Error sending SMS: {str(e)}")
         return {"success": False, "error": str(e)}
 
-
-def get_user_goals(phone_number, days=1):
+def get_user_goals(phone_number, date):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
     cur.execute('''
-        SELECT date, goals, completion_status 
+        SELECT goals, completion_status 
         FROM daily_goals 
-        WHERE phone_number = %s 
-        AND date >= CURRENT_DATE - INTERVAL '%s days'
-        ORDER BY date DESC
-    ''', (phone_number, days))
-    goals = cur.fetchall()
+        WHERE phone_number = %s AND date = %s
+    ''', (phone_number, date))
+    goals = cur.fetchone()
     cur.close()
     conn.close()
     return goals
 
-def parse_goals(message):
-    # Simple parsing: assumes goals are separated by newlines or commas
-    goals = re.split(r'[,\n]', message)
-    return [goal.strip() for goal in goals if goal.strip()]
-
-def generate_daily_message(phone_number):
-    yesterday_goals = get_user_goals(phone_number)
-    
-    if yesterday_goals:
-        yesterday = yesterday_goals[0]
-        goals_list = yesterday['goals']
-        goals_summary = "\n".join(goals_list)
-        prompt = f"""Human: You are an AI assistant for a goal-tracking SMS service. Yesterday's goals were:
-
-{goals_summary}
-
-Ask the user if they met these goals and what their goals are for today. Be brief and encouraging. Limit your response to 160 characters.
-
-Assistant: """
-    else:
-        prompt = """Human: You are an AI assistant for a goal-tracking SMS service. This is the user's first day. Ask them what their goals are for today. Be brief and encouraging. Limit your response to 160 characters.
-
-Assistant: """
-
-    response = claude_client.completions.create(
-        model="claude-2",
-        prompt=prompt,
-        max_tokens_to_sample=200,
-        temperature=0.7
-    )
-    
-    return response.completion.strip()
-
-def process_user_response(phone_number, message):
-    yesterday_goals = get_user_goals(phone_number)
-    
-    if yesterday_goals:
-        yesterday = yesterday_goals[0]
-        goals_list = yesterday['goals']
-        goals_summary = "\n".join(goals_list)
-    else:
-        goals_summary = "No previous goals found."
-
-    prompt = f"""Human: You are an AI assistant for a goal-tracking SMS service. The user's previous goals were:
-
-{goals_summary}
-
-The user's response is:
-
-{message}
-
-Analyze the response to determine:
-1. Which goals were met (if any)
-2. Any new goals mentioned
-3. A brief, encouraging response to the user (max 160 characters)
-
-Format your response as JSON with keys: "met_goals", "new_goals", and "response".
-
-Assistant: """
-
-    response = claude_client.completions.create(
-        model="claude-2",
-        prompt=prompt,
-        max_tokens_to_sample=500,
-        temperature=0.7
-    )
-    
-    try:
-        result = json.loads(response.completion.strip())
-        return result['response']
-    except json.JSONDecodeError:
-        print(f"Error decoding JSON from Claude's response: {response.completion.strip()}")
-        return {"met_goals": [], "new_goals": [], "response": "I couldn't process your response. Can you please rephrase it?"}
-    
-
-@app.route("/api/handle_sms_reply", methods=['POST'])
-def handle_sms_reply():
-    data = request.json
-    if not data:
-        return "Invalid data", 400
-
-    text_id = data.get('textId')
-    from_number = data.get('fromNumber')
-    message_body = data.get('text')
-
-    if not all([text_id, from_number, message_body]):
-        return "Missing required fields", 400
-
-    try:
-        # Process the incoming SMS reply
-        result = process_user_response(from_number, message_body)
-        update_user_goals(from_number, result['met_goals'], result['new_goals'])
-        
-        # Update last_response date
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute('UPDATE users SET last_response = %s WHERE phone_number = %s', (datetime.now().date(), from_number))
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        # Send a response back to the user if needed
-        if result.get('response'):
-            send_sms(from_number, result['response'])
-        
-        print(f"Processed SMS reply from {from_number}: {message_body}")
-        return "OK", 200
-    except Exception as e:
-        print(f"Error processing SMS reply: {str(e)}")
-        return "Internal server error", 500
-
-def update_user_goals(phone_number, met_goals, new_goals):
-    today = datetime.now().date()
+def store_user_goals(phone_number, date, goals):
     conn = get_db_connection()
     cur = conn.cursor()
-    
-    try:
-        # Update completion status for yesterday's goals
-        yesterday = today - timedelta(days=1)
-        cur.execute("""
-            UPDATE daily_goals 
-            SET completion_status = daily_goals.completion_status || %s::jsonb
-            WHERE phone_number = %s AND date = %s
-        """, (json.dumps({goal: True for goal in met_goals}), phone_number, yesterday))
+    cur.execute('''
+        INSERT INTO daily_goals (phone_number, date, goals, completion_status)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (phone_number, date) 
+        DO UPDATE SET goals = EXCLUDED.goals
+    ''', (phone_number, date, goals, [False] * len(goals)))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-        # Insert new goals for today
-        cur.execute("""
-            INSERT INTO daily_goals (phone_number, date, goals, completion_status)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (phone_number, date) 
-            DO UPDATE SET goals = daily_goals.goals || %s::jsonb
-        """, (phone_number, today, json.dumps(new_goals), json.dumps({}), json.dumps(new_goals)))
-        
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"Error updating user goals: {str(e)}")
-    finally:
-        cur.close()
-        conn.close()
+def update_goal_completion(phone_number, date, completion_status):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        UPDATE daily_goals
+        SET completion_status = %s
+        WHERE phone_number = %s AND date = %s
+    ''', (completion_status, phone_number, date))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def send_morning_message():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute('SELECT phone_number FROM users WHERE subscription_status = %s', ('active',))
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    for user in users:
+        message = "Good morning! What are your goals for today? Please separate them with commas."
+        send_sms(user['phone_number'], message)
+
+def send_evening_followup():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute('SELECT phone_number FROM users WHERE subscription_status = %s', ('active',))
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    yesterday = datetime.now().date() - timedelta(days=1)
+    for user in users:
+        yesterday_goals = get_user_goals(user['phone_number'], yesterday)
+        if yesterday_goals and yesterday_goals['goals']:
+            goals_list = ', '.join(yesterday_goals['goals'])
+            message = f"Yesterday, your goals were: {goals_list}. Did you meet them? Please respond with Yes/No for each goal, separated by commas."
+            send_sms(user['phone_number'], message)
 
 def check_inactivity_and_notify():
     conn = get_db_connection()
@@ -257,6 +167,7 @@ def check_inactivity_and_notify():
         SELECT u.phone_number, u.emergency_contact, u.last_response
         FROM users u
         WHERE u.last_response < %s OR u.last_response IS NULL
+        AND u.subscription_status = 'active'
     ''', (three_days_ago,))
     
     inactive_users = cur.fetchall()
@@ -274,45 +185,46 @@ def check_inactivity_and_notify():
     cur.close()
     conn.close()
 
-def send_daily_message():
-    print(f"send_daily_message started at {datetime.now()}")
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute('SELECT phone_number, last_response FROM users WHERE subscription_status = %s', ('active',))
-    users = cur.fetchall()
-    cur.close()
-    conn.close()
+@app.route("/sms_reply", methods=['POST'])
+def sms_reply():
+    data = request.json
+    phone_number = data['fromNumber']
+    message_body = data['text']
 
-    for user in users:
-        message = generate_daily_message(user['phone_number'])
-        print(message)
-        result = send_sms(user['phone_number'], message)
-        print(f"SMS sent to {user['phone_number']}: {result}")
-        
-        if user['last_response'] is None or (datetime.now().date() - user['last_response']).days >= 3:
-            check_inactivity_and_notify()
-
-    print(f"send_daily_message completed at {datetime.now()}")
-
-def store_user_response(phone_number, message):
     today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+
+    # Check if this is a response to the morning message (setting goals)
+    if "," in message_body and not any(word in message_body.lower() for word in ['yes', 'no']):
+        goals = [goal.strip() for goal in message_body.split(',')]
+        store_user_goals(phone_number, today, goals)
+        response = "Thanks for sharing your goals. I've saved them and will check in with you later!"
+    
+    # Check if this is a response to the evening follow-up (goal completion)
+    elif any(word in message_body.lower() for word in ['yes', 'no']):
+        yesterday_goals = get_user_goals(phone_number, yesterday)
+        if yesterday_goals:
+            responses = [r.strip().lower() for r in message_body.split(',')]
+            completion_status = [r == 'yes' for r in responses]
+            update_goal_completion(phone_number, yesterday, completion_status)
+            response = "Thanks for the update! Keep up the good work and let's focus on today's goals."
+        else:
+            response = "I'm sorry, I couldn't find your goals from yesterday. Let's focus on setting new goals for today!"
+    
+    else:
+        response = "I'm sorry, I didn't understand your message. Please make sure to separate your goals with commas, or respond with Yes/No for each goal when asked about completion."
+
+    send_sms(phone_number, response)
+
+    # Update last_response date
     conn = get_db_connection()
     cur = conn.cursor()
-    
-    # Check if there's an entry for today
-    cur.execute("SELECT id FROM goals WHERE phone_number = %s AND date = %s", (phone_number, today))
-    existing = cur.fetchone()
-    
-    if existing:
-        # Update existing entry
-        cur.execute("UPDATE goals SET goals = %s WHERE id = %s", (message, existing[0]))
-    else:
-        # Create new entry
-        cur.execute("INSERT INTO goals (phone_number, date, goals) VALUES (%s, %s, %s)", (phone_number, today, message))
-    
+    cur.execute('UPDATE users SET last_response = %s WHERE phone_number = %s', (datetime.now().date(), phone_number))
     conn.commit()
     cur.close()
     conn.close()
+
+    return '', 204
 
 REGISTER_TEMPLATE = """
 <!DOCTYPE html>
@@ -445,41 +357,12 @@ def register():
 
 @app.route('/test_daily_message')
 def test_daily_message():
-    send_daily_message()
+    send_morning_message()
     return "Daily message sent", 200
 
-@app.route("/sms_reply", methods=['POST'])
-def sms_reply():
-    data = request.json
-    phone_number = data['fromNumber']
-    message_body = data['text']
-
-    try:
-        result = process_user_response(phone_number, message_body)
-        update_user_goals(phone_number, result['met_goals'], result['new_goals'])
-        
-        # Update last_response date
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute('UPDATE users SET last_response = %s WHERE phone_number = %s', (datetime.now().date(), phone_number))
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-    except Exception as e:
-        print(f"Error processing SMS reply: {str(e)}")
-        result = {
-            "response": "I'm sorry, I encountered an error processing your message. Please try again later."
-        }
-    
-    # Always attempt to send an SMS response
-    sms_result = send_sms(phone_number, result['response'])
-    print(f"SMS sent to {phone_number}: {sms_result}")
-
-    return '', 204
-
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_daily_message, 'cron', hour=9, minute=0, timezone='US/Eastern')
+scheduler.add_job(send_morning_message, 'cron', hour=8, minute=30, timezone='US/Eastern')
+scheduler.add_job(send_evening_followup, 'cron', hour=20, minute=0, timezone='US/Eastern')
 scheduler.add_job(check_inactivity_and_notify, 'cron', hour=9, minute=0, timezone='US/Eastern')
 scheduler.start()
 
