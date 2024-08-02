@@ -32,8 +32,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 phone_number TEXT PRIMARY KEY,
                 emergency_contact TEXT,
-                last_response DATE,
-                subscription_status TEXT DEFAULT 'active'
+                last_response DATE
             )
         ''')
         
@@ -132,7 +131,7 @@ def update_goal_completion(phone_number, date, completion_status):
 def send_morning_message():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute('SELECT phone_number FROM users WHERE subscription_status = %s', ('active',))
+    cur.execute('SELECT phone_number FROM users')
     users = cur.fetchall()
     cur.close()
     conn.close()
@@ -144,7 +143,7 @@ def send_morning_message():
 def send_evening_followup():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute('SELECT phone_number FROM users WHERE subscription_status = %s', ('active',))
+    cur.execute('SELECT phone_number FROM users')
     users = cur.fetchall()
     cur.close()
     conn.close()
@@ -167,7 +166,6 @@ def check_inactivity_and_notify():
         SELECT u.phone_number, u.emergency_contact, u.last_response
         FROM users u
         WHERE u.last_response < %s OR u.last_response IS NULL
-        AND u.subscription_status = 'active'
     ''', (three_days_ago,))
     
     inactive_users = cur.fetchall()
@@ -343,7 +341,7 @@ def register():
         cur.execute('INSERT INTO users (phone_number, emergency_contact) VALUES (%s, %s)',
                     (phone_number, emergency_contact))
         conn.commit()
-        send_sms(phone_number, "You've been registered for SMS Goal Tracker! We'll start tracking your goals tomorrow. Reply STOP to opt-out at any time.")
+        send_sms(phone_number, "You've been registered for SMS Goal Tracker! We'll start tracking your goals tomorrow.")
         return "Registration successful! You'll receive a confirmation SMS shortly.", 201
     except psycopg2.IntegrityError:
         conn.rollback()
