@@ -138,10 +138,10 @@ def get_incomplete_goals(phone_number):
   
   incomplete_goals = []
   for row in cur.fetchall():
-    goals = json.loads(row['goals'])
-    completion_status = json.loads(row['completion_status'])
+    goals = row['goals']
+    completion_status = row['completion_status']
     for goal, status in zip(goals, completion_status):
-      if status == False and goal not in incomplete_goals:
+      if not status and goal not in incomplete_goals:
         incomplete_goals.append(goal)
   
   cur.close()
