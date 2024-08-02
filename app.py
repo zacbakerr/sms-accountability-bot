@@ -90,44 +90,6 @@ def send_sms(to_number, message):
         print(f"Error sending SMS: {str(e)}")
         return {"success": False, "error": str(e)}
 
-def get_user_goals(phone_number, date):
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=DictCursor)
-    cur.execute('''
-        SELECT goals, completion_status 
-        FROM daily_goals 
-        WHERE phone_number = %s AND date = %s
-    ''', (phone_number, date))
-    goals = cur.fetchone()
-    cur.close()
-    conn.close()
-    return goals
-
-def store_user_goals(phone_number, date, goals):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT INTO daily_goals (phone_number, date, goals, completion_status)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (phone_number, date) 
-        DO UPDATE SET goals = EXCLUDED.goals
-    ''', (phone_number, date, goals, [False] * len(goals)))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def update_goal_completion(phone_number, date, completion_status):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('''
-        UPDATE daily_goals
-        SET completion_status = %s
-        WHERE phone_number = %s AND date = %s
-    ''', (completion_status, phone_number, date))
-    conn.commit()
-    cur.close()
-    conn.close()
-
 def send_morning_message():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=DictCursor)
@@ -182,6 +144,49 @@ def check_inactivity_and_notify():
     
     cur.close()
     conn.close()
+def store_user_goals(phone_number, date, goals):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    goals_json = json.dumps(goals)  # Convert goals array to JSON string
+    cur.execute('''
+        INSERT INTO daily_goals (phone_number, date, goals, completion_status)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (phone_number, date) 
+        DO UPDATE SET goals = EXCLUDED.goals
+    ''', (phone_number, date, goals_json, json.dumps([False] * len(goals))))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def get_user_goals(phone_number, date):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=DictCursor)
+    cur.execute('''
+        SELECT goals, completion_status 
+        FROM daily_goals 
+        WHERE phone_number = %s AND date = %s
+    ''', (phone_number, date))
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+    if result:
+        return {
+            'goals': json.loads(result['goals']),
+            'completion_status': json.loads(result['completion_status'])
+        }
+    return None
+
+def update_goal_completion(phone_number, date, completion_status):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        UPDATE daily_goals
+        SET completion_status = %s
+        WHERE phone_number = %s AND date = %s
+    ''', (json.dumps(completion_status), phone_number, date))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 @app.route("/sms_reply", methods=['POST'])
 def sms_reply():
@@ -223,7 +228,6 @@ def sms_reply():
     conn.close()
 
     return '', 204
-
 REGISTER_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
