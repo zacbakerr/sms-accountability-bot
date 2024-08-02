@@ -302,6 +302,16 @@ REGISTER_TEMPLATE = """
 </html>
 """
 
+@app.route('/test_daily_message')
+def test_daily_message():
+  send_morning_message()
+  return "Daily morning message sent", 200
+
+@app.route('/test_evening_message')
+def test_evening_message():
+  send_evening_followup()
+  return "Evening follow-up message sent", 200
+
 @app.route('/')
 def register():
   return render_template_string(REGISTER_TEMPLATE)
